@@ -1,6 +1,6 @@
 from .utils import ABCMeta, abstract_attribute
 from .replay_memory import ReplayMemoryNaive, ReplayMemoryPrioritized
-from .network import DeepQNetwork, DuelingDeepQNetwork
+from .network import DeepQNetwork, DuelingDeepQNetwork, ActorCriticNetwork
 
 import os
 import time
@@ -317,3 +317,79 @@ class PerDuelingDoubleDQNAgent(PerDoubleAgent):
         self.target_network = DuelingDeepQNetwork(self.device, self.lr, self.nn_conf_func, self.input_dim, self.output_dim, reduction='none')
 
         self.update_target_network(force=True)
+
+
+class A3CAgent(Agent):
+    def __init__(self, n_env, lr, gamma, nn_conf_func, input_dim, output_dim, batch_size, save_frequency, log_frequency, save_dir, log_dir, load, algo, gpu, **kwargs):
+        super().__init__(n_env, lr, gamma, None, None, None, None, nn_conf_func, input_dim, output_dim,
+                         batch_size, 0, 0, 0, False, 0, save_frequency, log_frequency, save_dir, log_dir, load, algo, gpu)
+        self.online_network = ActorCriticNetwork(self.device, lr, nn_conf_func, input_dim, output_dim)
+        self.optimizer = self.online_network.optimizer
+        self.entropy_coef = 0.01
+        self.value_loss_coef = 0.5
+        self.max_grad_norm = 0.5
+
+    def replay_memory_buffer(self):
+        return None
+
+    def target_network(self):
+        return None
+
+    def transitions_to_tensor(self, transitions):
+        obses = T.as_tensor(np.asarray([t[0] for t in transitions]), dtype=T.float32).to(self.device)
+        actions = T.as_tensor(np.asarray([t[1] for t in transitions]), dtype=T.int64).to(self.device)
+        rewards = T.as_tensor(np.asarray([t[2] for t in transitions]), dtype=T.float32).to(self.device)
+        dones = T.as_tensor(np.asarray([t[3] for t in transitions]), dtype=T.float32).to(self.device)
+        next_obses = T.as_tensor(np.asarray([t[4] for t in transitions]), dtype=T.float32).to(self.device)
+        return obses, actions, rewards, dones, next_obses
+
+    # Not used in A3C: A3C is on-policy and does not use a replay buffer.
+    def store_transitions(self, *args, **kwargs):
+        pass
+
+    def choose_actions(self, obses):
+        return self.online_network.act(obses)
+
+    def learn(self, rollouts=None):
+        if rollouts is None:
+            return 0, 0, 0, 0
+        obses, actions, rewards, dones, next_obses = self.transitions_to_tensor(rollouts)
+        policy_logits, values = self.online_network.forward(obses)
+        _, next_value = self.online_network.forward(next_obses[-1:])
+        returns = []
+        R = next_value.detach()
+        for step in reversed(range(len(rewards))):
+            R = rewards[step] + self.gamma * R * (1.0 - dones[step])
+            returns.insert(0, R)
+        returns = T.cat(returns) if isinstance(returns[0], T.Tensor) else T.stack(returns)
+        log_probs = T.log_softmax(policy_logits, dim=-1)
+        action_log_probs = log_probs.gather(1, actions.unsqueeze(-1)).squeeze(-1)
+        advantage = returns - values.squeeze(-1)
+        value_loss = advantage.pow(2).mean()
+        policy_loss = -(advantage.detach() * action_log_probs).mean()
+        entropy = -(T.softmax(policy_logits, dim=-1) * log_probs).sum(-1).mean()
+        loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
+        self.optimizer.zero_grad()
+        loss.backward()
+        T.nn.utils.clip_grad_norm_(self.online_network.parameters(), self.max_grad_norm)
+        self.optimizer.step()
+        return loss.item(), policy_loss.item(), value_loss.item(), entropy.item()
+
+    def update_target_network(self, force=False):
+        pass
+
+    def load_model(self):
+        if self.load:
+            try:
+                self.online_network.load(self.save_path)
+            except Exception as e:
+                print('No model to load:', e)
+
+    def save_model(self):
+        self.online_network.save(self.save_path, self.step, self.episode_count, 0, 0)
+
+    def log(self):
+        pass
+
+    def info_mean(self, i):
+        pass

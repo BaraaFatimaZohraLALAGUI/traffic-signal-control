@@ -5,6 +5,7 @@ import os
 import time
 import argparse
 import itertools
+import numpy as np
 from datetime import timedelta
 
 
@@ -20,33 +21,51 @@ class Train:
             n_env=args.n_env
         )
 
-        self.agent = getattr(Agents, args.algo)(
-            n_env=args.n_env,
-            lr=args.lr,
-            gamma=args.gamma,
-            epsilon_start=args.eps_start,
-            epsilon_min=args.eps_min,
-            epsilon_decay=args.eps_dec,
-            epsilon_exp_decay=args.eps_dec_exp,
-            nn_conf_func=network_config,
-            input_dim=self.env.observation_space,
-            output_dim=self.env.action_space.n,
-            batch_size=args.bs,
-            min_buffer_size=args.min_mem,
-            buffer_size=args.max_mem,
-            update_target_frequency=args.target_update_freq,
-            target_soft_update=args.target_soft_update,
-            target_soft_update_tau=args.target_soft_update_tau,
-            save_frequency=args.save_freq,
-            log_frequency=args.log_freq,
-            save_dir=args.save_dir,
-            log_dir=args.log_dir,
-            load=args.load,
-            algo=args.algo,
-            gpu=args.gpu
-        )
-
-        self.agent.load_model()
+        # Support both DQN and A3C
+        if args.algo == 'A3CAgent':
+            self.agent = Agents.A3CAgent(
+                n_env=args.n_env,
+                lr=args.lr,
+                gamma=args.gamma,
+                nn_conf_func=network_config,
+                input_dim=self.env.observation_space,
+                output_dim=self.env.action_space.n,
+                batch_size=args.bs,
+                save_frequency=args.save_freq,
+                log_frequency=args.log_freq,
+                save_dir=args.save_dir,
+                log_dir=args.log_dir,
+                load=args.load,
+                algo=args.algo,
+                gpu=args.gpu
+            )
+        else:
+            self.agent = getattr(Agents, args.algo)(
+                n_env=args.n_env,
+                lr=args.lr,
+                gamma=args.gamma,
+                epsilon_start=args.eps_start,
+                epsilon_min=args.eps_min,
+                epsilon_decay=args.eps_dec,
+                epsilon_exp_decay=args.eps_dec_exp,
+                nn_conf_func=network_config,
+                input_dim=self.env.observation_space,
+                output_dim=self.env.action_space.n,
+                batch_size=args.bs,
+                min_buffer_size=args.min_mem,
+                buffer_size=args.max_mem,
+                update_target_frequency=args.target_update_freq,
+                target_soft_update=args.target_soft_update,
+                target_soft_update_tau=args.target_soft_update_tau,
+                save_frequency=args.save_freq,
+                log_frequency=args.log_freq,
+                save_dir=args.save_dir,
+                log_dir=args.log_dir,
+                load=args.load,
+                algo=args.algo,
+                gpu=args.gpu
+            )
+            self.agent.load_model()
 
         print()
         print("TRAIN")
@@ -60,6 +79,8 @@ class Train:
         self.max_total_steps = args.max_total_steps
 
     def init_replay_memory_buffer(self):
+        if isinstance(self.agent, Agents.A3CAgent):
+            return  # Not needed for A3C
         print()
         print("Initialize Replay Memory Buffer")
 
@@ -80,35 +101,57 @@ class Train:
                 print('---', str(timedelta(seconds=round((time.time() - self.agent.start_time), 0))), '---')
 
     def train_loop(self):
-        print()
-        print("Start Training")
+        if isinstance(self.agent, Agents.A3CAgent):
+            print("A3C Training Loop")
+            obs = self.env.reset()
+            total_steps = 0
+            episode = 0
+            while self.max_total_steps == 0 or total_steps < self.max_total_steps:
+                rollouts = []
+                done = False
+                steps = 0
+                while not done and steps < self.agent.batch_size:
+                    action = self.agent.choose_actions([obs])[0]
+                    next_obs, reward, done, _ = self.env.step(action)
+                    rollouts.append((obs, action, reward, done, next_obs))
+                    obs = next_obs
+                    steps += 1
+                    total_steps += 1
+                loss, policy_loss, value_loss, entropy = self.agent.learn(rollouts)
+                if done:
+                    obs = self.env.reset()
+                    episode += 1
+                if total_steps % self.agent.save_frequency == 0:
+                    self.agent.save_model()
+                if total_steps % self.agent.log_frequency == 0:
+                    print(f"Step: {total_steps}, Episode: {episode}, Loss: {loss:.4f}, Policy Loss: {policy_loss:.4f}, Value Loss: {value_loss:.4f}, Entropy: {entropy:.4f}")
+        else:
+            print("DQN Training Loop")
+            self.init_replay_memory_buffer()
+            obses = self.env.reset()
+            for step in itertools.count(start=self.agent.resume_step):
+                self.agent.step = step
 
-        obses = self.env.reset()
-        for step in itertools.count(start=self.agent.resume_step):
-            self.agent.step = step
+                actions = self.agent.choose_actions(obses)
 
-            actions = self.agent.choose_actions(obses)
+                new_obses, rews, dones, infos = self.env.step(actions)
 
-            new_obses, rews, dones, infos = self.env.step(actions)
+                self.agent.store_transitions(obses, actions, rews, dones, new_obses, infos)
 
-            self.agent.store_transitions(obses, actions, rews, dones, new_obses, infos)
+                obses = new_obses
 
-            obses = new_obses
+                self.agent.learn()
 
-            self.agent.learn()
+                self.agent.update_target_network()
 
-            self.agent.update_target_network()
+                self.agent.log()
 
-            self.agent.log()
+                self.agent.save_model()
 
-            self.agent.save_model()
-
-            if bool(self.max_total_steps) and (step * self.agent.n_env) >= self.max_total_steps:
-                exit()
+                if bool(self.max_total_steps) and (step * self.agent.n_env) >= self.max_total_steps:
+                    exit()
 
     def run(self):
-        self.init_replay_memory_buffer()
-
         self.train_loop()
 
 
@@ -141,7 +184,8 @@ if __name__ == "__main__":
                         help='DQNAgent ' +
                              'DoubleDQNAgent ' +
                              'DuelingDoubleDQNAgent ' +
-                             'PerDuelingDoubleDQNAgent'
+                             'PerDuelingDoubleDQNAgent ' +
+                             'A3CAgent'
                         )
 
     Train(parser.parse_args()).run()

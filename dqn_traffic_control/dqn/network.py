@@ -115,3 +115,31 @@ class DuelingDeepQNetwork(Network):
         actions = max_adv_q_indices.detach().tolist()
 
         return actions
+
+
+class ActorCriticNetwork(Network):
+    def __init__(self, device, lr, nn_conf_func, input_dim, output_dim, reduction='mean'):
+        super(ActorCriticNetwork, self).__init__(device, nn_conf_func, input_dim)
+        self.fc_policy = nn.Linear(self.fc_out_dim, output_dim)
+        self.fc_value = nn.Linear(self.fc_out_dim, 1)
+        self.optimizer = self.optim_func(self.parameters(), lr=lr)
+        self.loss = self.loss_func(reduction=reduction)
+        self.to(self.device)
+
+    def forward(self, s):
+        net = self.net(s)
+        policy_logits = self.fc_policy(net)
+        value = self.fc_value(net)
+        return policy_logits, value
+
+    def act(self, obses):
+        obses_t = T.as_tensor(obses, dtype=T.float32).to(self.device)
+        policy_logits, _ = self.forward(obses_t)
+        probs = T.softmax(policy_logits, dim=-1)
+        actions = T.multinomial(probs, num_samples=1)
+        return actions.squeeze(-1).cpu().numpy()
+
+    def evaluate(self, obses):
+        obses_t = T.as_tensor(obses, dtype=T.float32).to(self.device)
+        policy_logits, value = self.forward(obses_t)
+        return policy_logits, value
